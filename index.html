@@ -572,14 +572,14 @@
             drawTrails() {
                 this.trails.forEach((trail, i) => {
                     const age = this.trails.length - i - 1;
-                    const opacity = Math.pow(0.75, age); // More visible trails
+                    const opacity = Math.pow(0.85, age); // Slower fade for more visible trails
                     
-                    if (opacity > 0.03) {
+                    if (opacity > 0.02) { // Lower threshold for longer trails
                         trail.nodes.forEach(node => {
-                            const alpha = opacity * 0.6; // Increased opacity
+                            const alpha = opacity * 0.8; // Higher base opacity
                             this.ctx.fillStyle = node.color.replace('1)', alpha + ')');
                             this.ctx.beginPath();
-                            this.ctx.arc(node.x, node.y, node.size * 0.9, 0, Math.PI * 2);
+                            this.ctx.arc(node.x, node.y, node.size * 0.95, 0, Math.PI * 2); // Larger trail nodes
                             this.ctx.fill();
                         });
                     }
@@ -618,9 +618,9 @@
                 
                 // Draw highlighted edges with special styling
                 if (this.highlightedEdges.size > 0) {
-                    this.ctx.strokeStyle = 'rgba(255, 150, 50, 0.9)'; // Bright orange for paths
+                    this.ctx.strokeStyle = 'rgba(100, 150, 255, 0.9)'; // Blue for dependency tree
                     this.ctx.lineWidth = 3.0 / this.zoom; // Thicker highlighted edges
-                    this.ctx.shadowColor = 'rgba(255, 150, 50, 0.5)';
+                    this.ctx.shadowColor = 'rgba(100, 150, 255, 0.5)';
                     this.ctx.shadowBlur = 8 / this.zoom;
                     this.ctx.beginPath();
                     
@@ -653,18 +653,18 @@
                     
                     // Dim non-highlighted nodes when selection is active
                     if (this.highlightedNodes.size > 0 && !isHighlighted) {
-                        alpha *= 0.3; // Dim non-highlighted nodes
+                        alpha *= 0.2; // More aggressive dimming to focus on dependency tree
                     }
                     
-                    // Special styling for highlighted nodes
-                    if (isHighlighted) {
+                    // Special styling for highlighted nodes (consumers in dependency tree)
+                    if (isHighlighted && !isSelected) {
                         alpha = 1.0;
-                        // Brighter glow for highlighted nodes
-                        this.ctx.shadowColor = 'rgba(255, 150, 50, 0.8)';
+                        // Blue glow for consumers/dependents
+                        this.ctx.shadowColor = 'rgba(100, 150, 255, 0.8)';
                         this.ctx.shadowBlur = size * 0.8;
                     }
                     
-                    // Special styling for selected node
+                    // Special styling for selected node (the dependency being analyzed)
                     if (isSelected) {
                         // Pulsing effect for selected node
                         const pulse = 1 + Math.sin(this.time * 3) * 0.3;
@@ -786,7 +786,7 @@
             }
             
             selectNodeAndHighlightPaths(node) {
-                console.log('=== SELECTING NODE ===');
+                console.log('=== SELECTING NODE FOR DEPENDENCY ANALYSIS ===');
                 console.log('Selected node:', node);
                 
                 this.selectedNode = node;
@@ -794,80 +794,82 @@
                 this.highlightedNodes.clear();
                 this.highlightedEdges.clear();
                 
-                // Find main module
-                const mainModule = this.nodes.find(n => n.type === 'main');
-                if (!mainModule) {
-                    console.log('No main module found');
-                    this.clearSelection();
-                    return;
-                }
+                // Find all consumers (reverse dependencies) of this node
+                console.log('Finding all consumers of:', node.label, '(' + node.id + ')');
                 
-                if (node.id === mainModule.id) {
-                    console.log('Selected node is main module, clearing selection');
-                    this.clearSelection();
-                    return;
-                }
+                const allConsumers = this.findAllConsumers(node.id);
                 
-                console.log('Finding paths from', node.label, '(' + node.id + ')', 'to', mainModule.label, '(' + mainModule.id + ')');
-                
-                // Simple BFS to find shortest path first
-                const path = this.findShortestPath(node.id, mainModule.id);
-                if (path.length > 0) {
-                    console.log('Found path:', path.map(id => {
+                if (allConsumers.size > 0) {
+                    console.log(`Found ${allConsumers.size} consumers:`, Array.from(allConsumers).map(id => {
                         const n = this.nodeMap.get(id);
                         return n ? n.label : id;
                     }));
                     
-                    this.highlightedPaths = [path];
+                    // Highlight the selected node
+                    this.highlightedNodes.add(node.id);
                     
-                    // Mark all nodes and edges in path for highlighting
-                    for (let i = 0; i < path.length; i++) {
-                        this.highlightedNodes.add(path[i]);
-                        if (i < path.length - 1) {
-                            this.highlightedEdges.add(`${path[i]}-${path[i + 1]}`);
-                            this.highlightedEdges.add(`${path[i + 1]}-${path[i]}`); // Both directions
-                        }
-                    }
+                    // Highlight all consumers
+                    allConsumers.forEach(consumerId => {
+                        this.highlightedNodes.add(consumerId);
+                    });
+                    
+                    // Highlight all edges in the dependency tree
+                    this.findDependencyEdges(node.id, allConsumers);
                     
                     console.log('Highlighted nodes:', Array.from(this.highlightedNodes));
                     console.log('Highlighted edges:', Array.from(this.highlightedEdges));
                 } else {
-                    console.log('No path found');
+                    console.log('No consumers found - this might be a leaf node');
+                    // Just highlight the selected node itself
+                    this.highlightedNodes.add(node.id);
                 }
             }
             
-            findShortestPath(startId, endId) {
-                console.log('=== PATHFINDING ===');
-                console.log('Start:', startId, 'End:', endId);
-                console.log('Adjacency list has', this.adjacencyList.size, 'entries');
+            findAllConsumers(targetNodeId) {
+                console.log('=== REVERSE DEPENDENCY ANALYSIS ===');
+                console.log('Finding consumers of:', targetNodeId);
                 
-                const queue = [[startId]];
+                const consumers = new Set();
                 const visited = new Set();
+                const consumptionEdges = new Set(); // Track the actual consumption edges we find
                 
-                while (queue.length > 0) {
-                    const path = queue.shift();
-                    const currentId = path[path.length - 1];
+                // Use DFS to find all nodes that transitively depend on the target
+                const findConsumersRecursive = (nodeId, depth = 0) => {
+                    if (visited.has(nodeId) || depth > 10) return; // Prevent infinite loops
+                    visited.add(nodeId);
                     
-                    if (currentId === endId) {
-                        console.log('Found path:', path);
-                        return path;
-                    }
+                    console.log(`  ${'  '.repeat(depth)}Checking consumers of: ${nodeId}`);
                     
-                    if (visited.has(currentId)) continue;
-                    visited.add(currentId);
-                    
-                    const neighbors = this.adjacencyList.get(currentId) || [];
-                    console.log(`Node ${currentId} has neighbors:`, neighbors);
-                    
-                    neighbors.forEach(neighborId => {
-                        if (!visited.has(neighborId) && !path.includes(neighborId)) {
-                            queue.push([...path, neighborId]);
+                    // Find all edges where this node is the SOURCE (things this node provides to)
+                    this.edges.forEach(edge => {
+                        if (edge.source === nodeId) {
+                            console.log(`  ${'  '.repeat(depth)}  Found consumer: ${edge.source} → ${edge.target}`);
+                            consumers.add(edge.target);
+                            
+                            // Track this as a consumption edge
+                            consumptionEdges.add(`${edge.source}-${edge.target}`);
+                            consumptionEdges.add(`${edge.target}-${edge.source}`);
+                            
+                            // Recursively find what depends on this consumer
+                            findConsumersRecursive(edge.target, depth + 1);
                         }
                     });
-                }
+                };
                 
-                console.log('No path found');
-                return [];
+                findConsumersRecursive(targetNodeId);
+                
+                // Store the consumption edges for later use
+                this.consumptionEdges = consumptionEdges;
+                
+                return consumers;
+            }
+            
+            findDependencyEdges(targetNodeId, allConsumers) {
+                // Only highlight edges that are part of the actual consumption chain
+                // Not all edges between highlighted nodes
+                this.highlightedEdges = new Set(this.consumptionEdges);
+                
+                console.log('Consumption edges to highlight:', Array.from(this.consumptionEdges));
             }
             
             clearSelection() {

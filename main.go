@@ -47,8 +47,10 @@ func main() {
 	port := flag.String("port", "8080", "Server port")
 	flag.Parse()
 
-	if len(flag.Args()) > 0 {
-		targetPath = flag.Args()[0]
+	// Process positional arguments (overrides flags)
+	args := flag.Args()
+	if len(args) > 0 {
+		targetPath = args[0]
 	}
 
 	// Validate and fix empty path
@@ -136,7 +138,9 @@ func analyzeProject(projectPath string) (*Graph, error) {
 
 	// Parse Go files
 	err := filepath.Walk(projectPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || !strings.HasSuffix(path, ".go") || strings.Contains(path, "vendor/") {
+		// Skip vendor folder unless explicitly included
+		skipVendor := strings.Contains(path, "vendor/")
+		if err != nil || !strings.HasSuffix(path, ".go") || skipVendor {
 			return err
 		}
 
@@ -155,7 +159,7 @@ func analyzeProject(projectPath string) (*Graph, error) {
 		// Use directory name for label to avoid confusion with main module
 		displayName := filepath.Base(relPath)
 		if displayName == "root" {
-			displayName = "main-pkg"
+			displayName = "main"
 		}
 		addNode(graph, nodeMap, packageID, displayName, "package", 0)
 
@@ -194,12 +198,28 @@ func analyzeProject(projectPath string) (*Graph, error) {
 					// Track that this package imports this module
 					moduleToImporter[rootModule] = append(moduleToImporter[rootModule], packageID)
 
-					importID := "import:" + importPath
-					addNode(graph, nodeMap, importID, filepath.Base(importPath), "external", 1)
-					addEdge(graph, packageID, importID)
+					// If import path exactly matches the module root, connect directly to module
+					if importPath == rootModule {
+						addEdge(graph, packageID, rootModule)
+					} else {
+						// Create separate import node for sub-packages
+						importID := "import:" + importPath
+						// Use full import path for external dependencies, not just base name
+						importLabel := importPath
+						// If it's too long, show module + last part
+						if len(importPath) > 40 {
+							parts := strings.Split(importPath, "/")
+							if len(parts) > 2 {
+								// Show first part (module) + last part
+								importLabel = parts[0] + "/.../" + parts[len(parts)-1]
+							}
+						}
+						addNode(graph, nodeMap, importID, importLabel, "external", 1)
+						addEdge(graph, packageID, importID)
 
-					// Connect import to its root module
-					addEdge(graph, importID, rootModule)
+						// Connect import to its root module
+						addEdge(graph, importID, rootModule)
+					}
 				}
 			}
 		}
