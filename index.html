@@ -11,7 +11,9 @@
             overflow: hidden; 
             font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
         }
-        canvas { display: block; }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        canvas:focus { outline: none; }
         .info {
             position: absolute;
             top: 20px;
@@ -20,6 +22,17 @@
             font-size: 11px;
             pointer-events: none;
         }
+        .controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: rgba(255,255,255,0.6);
+            font-size: 10px;
+            text-align: right;
+        }
+        .fps {
+            color: rgba(255,255,100,0.8);
+        }
     </style>
 </head>
 <body>
@@ -27,19 +40,63 @@
     <div class="info">
         <div id="nodeCount">nodes: 0</div>
         <div id="edgeCount">edges: 0</div>
-        <div style="margin-top: 8px; opacity: 0.5;">press L to toggle labels</div>
+        <div style="margin-top: 8px; opacity: 0.5;">
+            L: toggle labels<br>
+            T: toggle trails<br>
+            P: toggle physics<br>
+            Mouse: drag to pan<br>
+            Wheel: zoom in/out
+        </div>
+    </div>
+    <div class="controls">
+        <div class="fps" id="fps">0 fps</div>
+        <div id="perf">0ms update</div>
+        <div id="zoom">zoom: 1.0x</div>
+        <div style="margin-top: 4px; opacity: 0.7;">
+            <div>physics: <span id="physicsMode">on</span></div>
+            <div>trails: <span id="trailsMode">on</span></div>
+            <div>labels: <span id="labelsMode">hover</span></div>
+        </div>
     </div>
 
     <script>
-        class MinimalGraph {
+        class OptimizedGraph {
             constructor() {
                 this.canvas = document.getElementById('canvas');
                 this.ctx = this.canvas.getContext('2d');
                 this.nodes = [];
                 this.edges = [];
+                this.nodeMap = new Map(); // Fast ID lookup
+                this.adjacencyList = new Map(); // O(1) neighbor lookup
                 this.time = 0;
-                this.trails = []; // Store trail history
-                this.maxTrailLength = 15;
+                
+                // Performance settings
+                this.enablePhysics = true;
+                this.enableTrails = true;
+                this.maxTrailLength = 12; // Increased for better visibility
+                this.trails = [];
+                this.spatialGrid = null;
+                this.gridSize = 80;
+                
+                // Zoom and pan
+                this.zoom = 1.0;
+                this.panX = 0;
+                this.panY = 0;
+                this.isDragging = false;
+                this.lastMouseX = 0;
+                this.lastMouseY = 0;
+                
+                // Performance monitoring
+                this.frameCount = 0;
+                this.lastTime = performance.now();
+                this.fps = 0;
+                this.updateTime = 0;
+                
+                // Interaction
+                this.hoveredNode = null;
+                this.showAllLabels = false;
+                this.mouseX = 0;
+                this.mouseY = 0;
                 
                 this.resize();
                 this.connect();
@@ -50,26 +107,72 @@
             }
             
             setupInteraction() {
-                this.hoveredNode = null;
-                this.showAllLabels = false;
-                this.mouseX = 0;
-                this.mouseY = 0;
+                // Mouse drag for panning
+                this.canvas.addEventListener('mousedown', (e) => {
+                    this.isDragging = true;
+                    this.lastMouseX = e.clientX;
+                    this.lastMouseY = e.clientY;
+                });
                 
                 this.canvas.addEventListener('mousemove', (e) => {
                     const rect = this.canvas.getBoundingClientRect();
                     this.mouseX = e.clientX - rect.left;
                     this.mouseY = e.clientY - rect.top;
+                    
+                    if (this.isDragging) {
+                        const deltaX = e.clientX - this.lastMouseX;
+                        const deltaY = e.clientY - this.lastMouseY;
+                        this.panX += deltaX;
+                        this.panY += deltaY;
+                        this.lastMouseX = e.clientX;
+                        this.lastMouseY = e.clientY;
+                    } else {
+                        // Update hover detection with zoom/pan transform
+                        const worldX = (this.mouseX - this.panX) / this.zoom;
+                        const worldY = (this.mouseY - this.panY) / this.zoom;
+                        this.hoveredNode = this.getNodeAt(worldX, worldY);
+                    }
+                });
+                
+                this.canvas.addEventListener('mouseup', () => {
+                    this.isDragging = false;
                 });
                 
                 this.canvas.addEventListener('mouseleave', () => {
-                    this.mouseX = 0;
-                    this.mouseY = 0;
+                    this.isDragging = false;
                     this.hoveredNode = null;
                 });
                 
+                // Zoom with mouse wheel
+                this.canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+                    const newZoom = Math.max(0.1, Math.min(5.0, this.zoom * zoomFactor));
+                    
+                    // Zoom towards mouse position
+                    const mouseX = e.clientX - this.canvas.getBoundingClientRect().left;
+                    const mouseY = e.clientY - this.canvas.getBoundingClientRect().top;
+                    
+                    this.panX = mouseX - (mouseX - this.panX) * (newZoom / this.zoom);
+                    this.panY = mouseY - (mouseY - this.panY) * (newZoom / this.zoom);
+                    this.zoom = newZoom;
+                    
+                    document.getElementById('zoom').textContent = `zoom: ${this.zoom.toFixed(1)}x`;
+                });
+                
                 window.addEventListener('keydown', (e) => {
+                    console.log('Key pressed:', e.key); // Debug logging
                     if (e.key === 'l' || e.key === 'L') {
                         this.showAllLabels = !this.showAllLabels;
+                        console.log('Labels toggled to:', this.showAllLabels); // Debug logging
+                        document.getElementById('labelsMode').textContent = this.showAllLabels ? 'all' : 'hover';
+                    } else if (e.key === 't' || e.key === 'T') {
+                        this.enableTrails = !this.enableTrails;
+                        if (!this.enableTrails) this.trails = [];
+                        document.getElementById('trailsMode').textContent = this.enableTrails ? 'on' : 'off';
+                    } else if (e.key === 'p' || e.key === 'P') {
+                        this.enablePhysics = !this.enablePhysics;
+                        document.getElementById('physicsMode').textContent = this.enablePhysics ? 'on' : 'off';
                     }
                 });
             }
@@ -81,6 +184,7 @@
                 this.h = this.canvas.height;
                 this.cx = this.w / 2;
                 this.cy = this.h / 2;
+                this.rebuildSpatialGrid();
             }
             
             connect() {
@@ -93,187 +197,330 @@
             }
             
             setGraph(graph) {
-                this.nodes = graph.nodes.map((n, i) => ({
-                    ...n,
-                    x: this.cx + Math.cos(i * 0.618) * 200,
-                    y: this.cy + Math.sin(i * 0.618) * 200,
-                    vx: 0, vy: 0,
-                    angle: Math.random() * Math.PI * 2,
-                    speed: 0.01 + Math.random() * 0.02
-                }));
+                const startTime = performance.now();
+                
+                console.log('Received graph data:', graph); // Debug logging
+                console.log('Nodes:', graph.nodes.length, 'Edges:', graph.edges.length);
+                
+                // Log node types to debug yellow dots issue
+                const nodeTypes = {};
+                graph.nodes.forEach(node => {
+                    nodeTypes[node.type] = (nodeTypes[node.type] || 0) + 1;
+                });
+                console.log('Node types:', nodeTypes);
+                
+                // Log orphaned nodes (nodes with no edges)
+                const nodeIds = new Set(graph.nodes.map(n => n.id));
+                const connectedNodes = new Set();
+                graph.edges.forEach(edge => {
+                    connectedNodes.add(edge.source);
+                    connectedNodes.add(edge.target);
+                });
+                const orphanedNodes = graph.nodes.filter(n => !connectedNodes.has(n.id));
+                if (orphanedNodes.length > 0) {
+                    console.log('Orphaned nodes (no edges):', orphanedNodes);
+                }
+                
+                // Clear existing data
+                this.nodeMap.clear();
+                this.adjacencyList.clear();
+                
+                // Initialize nodes with optimized positioning
+                this.nodes = graph.nodes.map((n, i) => {
+                    const angle = i * 0.618 * Math.PI * 2; // Golden angle
+                    const radius = Math.sqrt(i) * 40; // Slightly increased spacing
+                    const node = {
+                        ...n,
+                        x: this.cx + Math.cos(angle) * radius,
+                        y: this.cy + Math.sin(angle) * radius,
+                        vx: 0, vy: 0,
+                        angle: Math.random() * Math.PI * 2,
+                        speed: 0.01 + Math.random() * 0.02,
+                        gridX: 0, gridY: 0 // Spatial grid position
+                    };
+                    this.nodeMap.set(n.id, node);
+                    return node;
+                });
+                
+                // Build adjacency list for O(1) neighbor lookup
                 this.edges = graph.edges;
+                this.edges.forEach(edge => {
+                    if (!this.adjacencyList.has(edge.source)) {
+                        this.adjacencyList.set(edge.source, []);
+                    }
+                    if (!this.adjacencyList.has(edge.target)) {
+                        this.adjacencyList.set(edge.target, []);
+                    }
+                    this.adjacencyList.get(edge.source).push(edge.target);
+                    this.adjacencyList.get(edge.target).push(edge.source);
+                });
+                
+                this.rebuildSpatialGrid();
                 
                 document.getElementById('nodeCount').textContent = 'nodes: ' + this.nodes.length;
                 document.getElementById('edgeCount').textContent = 'edges: ' + this.edges.length;
+                
+                // Auto-disable trails only for very large graphs
+                if (this.nodes.length > 200) {
+                    this.enableTrails = false;
+                    this.maxTrailLength = 5;
+                    document.getElementById('trailsMode').textContent = 'off (auto)';
+                } else {
+                    this.enableTrails = true;
+                    document.getElementById('trailsMode').textContent = 'on';
+                }
+                
+                console.log(`Graph setup took ${(performance.now() - startTime).toFixed(1)}ms`);
+                
+                // Ensure canvas can receive keyboard events
+                this.canvas.tabIndex = 0;
+                this.canvas.focus();
+            }
+            
+            rebuildSpatialGrid() {
+                this.spatialGrid = new Map();
+                this.gridCols = Math.ceil(this.w / this.gridSize);
+                this.gridRows = Math.ceil(this.h / this.gridSize);
+            }
+            
+            updateSpatialGrid() {
+                this.spatialGrid.clear();
+                this.nodes.forEach(node => {
+                    const gridX = Math.floor(node.x / this.gridSize);
+                    const gridY = Math.floor(node.y / this.gridSize);
+                    const key = gridX + ',' + gridY;
+                    
+                    node.gridX = gridX;
+                    node.gridY = gridY;
+                    
+                    if (!this.spatialGrid.has(key)) {
+                        this.spatialGrid.set(key, []);
+                    }
+                    this.spatialGrid.get(key).push(node);
+                });
+            }
+            
+            getNearbyNodes(node) {
+                const nearby = [];
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        const key = (node.gridX + dx) + ',' + (node.gridY + dy);
+                        const cellNodes = this.spatialGrid.get(key);
+                        if (cellNodes) {
+                            nearby.push(...cellNodes);
+                        }
+                    }
+                }
+                return nearby;
             }
             
             update() {
-                this.time += 0.012;
+                const updateStart = performance.now();
                 
-                // Check for hover
-                this.hoveredNode = this.getNodeAt(this.mouseX || 0, this.mouseY || 0);
-                
-                // Store current frame for trails
-                this.trails.push({
-                    nodes: this.nodes.map(n => ({
-                        x: n.x, y: n.y, 
-                        size: this.getNodeSize(n),
-                        color: this.getNodeColor(n),
-                        type: n.type
-                    })),
-                    edges: this.edges.map(edge => {
-                        const source = this.nodes.find(n => n.id === edge.source);
-                        const target = this.nodes.find(n => n.id === edge.target);
-                        return source && target ? {
-                            x1: source.x, y1: source.y,
-                            x2: target.x, y2: target.y
-                        } : null;
-                    }).filter(Boolean),
-                    timestamp: this.time
-                });
-                
-                // Limit trail length
-                if (this.trails.length > this.maxTrailLength) {
-                    this.trails.shift();
+                if (!this.enablePhysics) {
+                    this.updateTime = performance.now() - updateStart;
+                    return;
                 }
                 
-                // More natural organic movement
-                this.nodes.forEach((node, i) => {
-                    const others = this.nodes.filter((_, j) => j !== i);
-                    
-                    // Gentler breathing motion
+                this.time += 0.012;
+                
+                // Update spatial grid less frequently for better performance
+                if (this.frameCount % 3 === 0) {
+                    this.updateSpatialGrid();
+                }
+                
+                // Store trails more frequently for better visibility
+                if (this.enableTrails && this.frameCount % 1 === 0) {
+                    this.storeTrailFrame();
+                }
+                
+                // Physics update with spatial optimization
+                this.nodes.forEach(node => {
+                    // Breathing motion
                     node.angle += node.speed * 0.7;
                     const breathe = Math.sin(node.angle) * 0.3;
                     
-                    // Smoother repulsion
                     let fx = 0, fy = 0;
-                    others.forEach(other => {
+                    
+                    // Only use spatial grid for repulsion if we have many nodes
+                    const useGrid = this.nodes.length > 50;
+                    const neighbors = useGrid ? this.getNearbyNodes(node) : this.nodes;
+                    
+                    // Repulsion with distance culling
+                    neighbors.forEach(other => {
+                        if (other === node) return;
+                        
                         const dx = node.x - other.x;
                         const dy = node.y - other.y;
-                        const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-                        if (dist < 120) {
-                            const force = 800 / (dist * dist);
+                        const distSq = dx*dx + dy*dy;
+                        
+                        if (distSq < 14400 && distSq > 1) { // 120px radius, avoid sqrt
+                            const dist = Math.sqrt(distSq);
+                            const force = 800 / distSq;
                             fx += (dx / dist) * force;
                             fy += (dy / dist) * force;
                         }
                     });
                     
-                    // Gentle center attraction with depth
+                    // Center attraction
                     const centerDx = this.cx - node.x;
                     const centerDy = this.cy - node.y;
-                    const depthFactor = 1 + node.depth * 0.2;
+                    const depthFactor = 1 + (node.depth || 0) * 0.2;
                     fx += centerDx * 0.0008 * depthFactor;
                     fy += centerDy * 0.0008 * depthFactor;
                     
-                    // Spring connections
-                    this.edges.forEach(edge => {
-                        const other = this.nodes.find(n => 
-                            (n.id === edge.target && node.id === edge.source) ||
-                            (n.id === edge.source && node.id === edge.target)
-                        );
-                        if (other) {
-                            const dx = other.x - node.x;
-                            const dy = other.y - node.y;
-                            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-                            const ideal = 90 + node.depth * 15;
-                            const spring = (dist - ideal) * 0.0008;
-                            fx += (dx / dist) * spring;
-                            fy += (dy / dist) * spring;
-                        }
-                    });
+                    // Spring connections using adjacency list
+                    const connectedIds = this.adjacencyList.get(node.id);
+                    if (connectedIds) {
+                        connectedIds.forEach(otherId => {
+                            const other = this.nodeMap.get(otherId);
+                            if (other) {
+                                const dx = other.x - node.x;
+                                const dy = other.y - node.y;
+                                const distSq = dx*dx + dy*dy;
+                                const dist = Math.sqrt(distSq) || 1;
+                                const ideal = 90 + (node.depth || 0) * 15;
+                                const spring = (dist - ideal) * 0.0008;
+                                fx += (dx / dist) * spring;
+                                fy += (dy / dist) * spring;
+                            }
+                        });
+                    }
                     
-                    // Smoother velocity updates
+                    // Velocity updates
                     node.vx += fx * 0.08;
                     node.vy += fy * 0.08;
                     node.vx *= 0.97;
                     node.vy *= 0.97;
                     
-                    // Natural movement with gentle breathing
+                    // Position updates
                     node.x += node.vx + breathe * 0.5;
                     node.y += node.vy + breathe * 0.5;
                 });
+                
+                this.updateTime = performance.now() - updateStart;
+            }
+            
+            storeTrailFrame() {
+                if (this.nodes.length > 300) return; // Skip trails for very large graphs
+                
+                this.trails.push({
+                    nodes: this.nodes.map(n => ({
+                        x: n.x, y: n.y, 
+                        size: this.getNodeSize(n),
+                        color: this.getNodeColor(n)
+                    })),
+                    timestamp: this.time
+                });
+                
+                if (this.trails.length > this.maxTrailLength) {
+                    this.trails.shift();
+                }
             }
             
             draw() {
-                // Clear canvas completely
+                // Save context for transformations
+                this.ctx.save();
+                
+                // Clear canvas
                 this.ctx.fillStyle = '#0a0a0a';
                 this.ctx.fillRect(0, 0, this.w, this.h);
                 
-                // Draw trails with subtle fading opacity
+                // Apply zoom and pan transformations
+                this.ctx.translate(this.panX, this.panY);
+                this.ctx.scale(this.zoom, this.zoom);
+                
+                // Draw trails (if enabled and not too many nodes)
+                if (this.enableTrails && this.nodes.length < 300) {
+                    this.drawTrails();
+                }
+                
+                // Draw edges (with culling for large graphs)
+                this.drawEdges();
+                
+                // Draw nodes
+                this.drawNodes();
+                
+                // Restore context for UI elements
+                this.ctx.restore();
+                
+                // Draw labels (in screen space, not world space)
+                if (this.hoveredNode) {
+                    this.drawLabel(this.hoveredNode);
+                }
+                if (this.showAllLabels) {
+                    // Show labels for all nodes, but limit rendering for performance
+                    const maxLabelsToShow = 300; // Increased limit
+                    const nodesToLabel = this.nodes.length > maxLabelsToShow ? 
+                        this.nodes.slice(0, maxLabelsToShow) : this.nodes;
+                    nodesToLabel.forEach(node => this.drawLabel(node));
+                }
+            }
+            
+            drawTrails() {
                 this.trails.forEach((trail, i) => {
                     const age = this.trails.length - i - 1;
-                    const opacity = Math.pow(0.75, age);
+                    const opacity = Math.pow(0.75, age); // More visible trails
                     
-                    if (opacity > 0.02) {
-                        // Draw trail edges
-                        this.ctx.strokeStyle = `rgba(100, 100, 100, ${opacity * 0.1})`;
-                        this.ctx.lineWidth = 0.6;
-                        trail.edges.forEach(edge => {
-                            this.ctx.beginPath();
-                            this.ctx.moveTo(edge.x1, edge.y1);
-                            this.ctx.lineTo(edge.x2, edge.y2);
-                            this.ctx.stroke();
-                        });
-                        
-                        // Draw trail nodes
+                    if (opacity > 0.03) {
                         trail.nodes.forEach(node => {
-                            const alpha = opacity * 0.4;
+                            const alpha = opacity * 0.6; // Increased opacity
                             this.ctx.fillStyle = node.color.replace('1)', alpha + ')');
                             this.ctx.beginPath();
-                            this.ctx.arc(node.x, node.y, node.size, 0, Math.PI * 2);
+                            this.ctx.arc(node.x, node.y, node.size * 0.9, 0, Math.PI * 2);
                             this.ctx.fill();
                         });
                     }
                 });
+            }
+            
+            drawEdges() {
+                this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.4)'; // More visible edges
+                this.ctx.lineWidth = 1.0 / this.zoom; // Scale line width with zoom
+                this.ctx.beginPath();
                 
-                // Draw current frame (full opacity)
-                // Draw edges
-                this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.3)';
-                this.ctx.lineWidth = 0.8;
-                this.edges.forEach(edge => {
-                    const source = this.nodes.find(n => n.id === edge.source);
-                    const target = this.nodes.find(n => n.id === edge.target);
+                // Batch edge drawing for better performance
+                let edgeCount = 0;
+                const maxEdges = this.nodes.length > 200 ? 500 : this.edges.length;
+                
+                for (const edge of this.edges) {
+                    if (edgeCount++ > maxEdges) break;
+                    
+                    const source = this.nodeMap.get(edge.source);
+                    const target = this.nodeMap.get(edge.target);
                     if (source && target) {
-                        this.ctx.beginPath();
                         this.ctx.moveTo(source.x, source.y);
                         this.ctx.lineTo(target.x, target.y);
-                        this.ctx.stroke();
                     }
-                });
-                
-                // Draw nodes
+                }
+                this.ctx.stroke();
+            }
+            
+            drawNodes() {
                 this.nodes.forEach(node => {
                     const size = this.getNodeSize(node);
                     const color = this.getNodeColor(node);
                     const alpha = 0.8 + Math.sin(this.time + node.x * 0.005) * 0.2;
                     
-                    // Main node body
+                    // Main node
                     this.ctx.fillStyle = color.replace('1)', alpha + ')');
                     this.ctx.beginPath();
                     this.ctx.arc(node.x, node.y, size, 0, Math.PI * 2);
                     this.ctx.fill();
                     
-                    // Minimal glow
-                    this.ctx.shadowColor = color;
-                    this.ctx.shadowBlur = size * 0.3;
-                    this.ctx.fill();
-                    this.ctx.shadowBlur = 0;
+                    // Glow (only for important nodes in large graphs)
+                    if (this.nodes.length < 150 || node.type === 'main') {
+                        this.ctx.shadowColor = color;
+                        this.ctx.shadowBlur = size * 0.4;
+                        this.ctx.fill();
+                        this.ctx.shadowBlur = 0;
+                    }
                 });
-                
-                // Draw hover label
-                if (this.hoveredNode) {
-                    this.drawLabel(this.hoveredNode);
-                }
-                
-                // Draw all labels if toggled
-                if (this.showAllLabels) {
-                    this.nodes.forEach(node => this.drawLabel(node));
-                }
             }
             
             getNodeSize(node) {
-                const base = { main: 8, package: 4, internal: 3, external: 2 };
-                return base[node.type] || 2;
+                const base = { main: 8, package: 5, internal: 4, external: 3 }; // Slightly larger nodes
+                return base[node.type] || 3;
             }
             
             getNodeColor(node) {
@@ -291,7 +538,7 @@
                     const dx = x - node.x;
                     const dy = y - node.y;
                     const size = this.getNodeSize(node);
-                    if (Math.sqrt(dx * dx + dy * dy) < size + 5) {
+                    if (dx*dx + dy*dy < (size + 8) * (size + 8)) { // Larger hit area
                         return node;
                     }
                 }
@@ -299,45 +546,72 @@
             }
             
             drawLabel(node) {
-                const size = this.getNodeSize(node);
-                const x = node.x;
-                const y = node.y - size - 8;
+                // Transform node position to screen coordinates
+                const screenX = node.x * this.zoom + this.panX;
+                const screenY = node.y * this.zoom + this.panY;
+                const size = this.getNodeSize(node) * this.zoom;
                 
-                // Clean label text
-                let text = node.label;
-                if (text.length > 20) {
-                    text = text.substring(0, 18) + '..';
+                // Skip if off-screen (with larger margin for labels)
+                if (screenX < -200 || screenX > this.w + 200 || screenY < -100 || screenY > this.h + 100) {
+                    return;
                 }
                 
-                // Measure text
-                this.ctx.font = '11px SF Mono, Monaco, monospace';
+                const x = screenX;
+                const y = screenY - size - 15; // More space above node
+                
+                let text = node.label;
+                // Adjust text length based on zoom level
+                const maxLength = Math.max(15, Math.min(30, Math.floor(20 * this.zoom)));
+                if (text.length > maxLength) {
+                    text = text.substring(0, maxLength - 2) + '..';
+                }
+                
+                // Scale font with zoom, but keep readable
+                const fontSize = Math.max(10, Math.min(16, 12 * this.zoom));
+                this.ctx.font = `${fontSize}px SF Mono, Monaco, monospace`;
                 const metrics = this.ctx.measureText(text);
                 const textWidth = metrics.width;
-                const textHeight = 12;
+                const textHeight = fontSize + 2;
                 
-                // Background
-                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                this.ctx.fillRect(x - textWidth/2 - 4, y - textHeight - 2, textWidth + 8, textHeight + 4);
+                // Background with stronger opacity
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.95)';
+                const padding = 6;
+                this.ctx.fillRect(x - textWidth/2 - padding, y - textHeight - 3, textWidth + padding*2, textHeight + 6);
                 
                 // Border
-                this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-                this.ctx.lineWidth = 0.5;
-                this.ctx.strokeRect(x - textWidth/2 - 4, y - textHeight - 2, textWidth + 8, textHeight + 4);
+                this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                this.ctx.lineWidth = 1;
+                this.ctx.strokeRect(x - textWidth/2 - padding, y - textHeight - 3, textWidth + padding*2, textHeight + 6);
                 
-                // Text
-                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                // Text with maximum contrast
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 1.0)';
                 this.ctx.textAlign = 'center';
                 this.ctx.fillText(text, x, y - 2);
+            }
+            
+            updatePerformanceMetrics() {
+                this.frameCount++;
+                const currentTime = performance.now();
+                
+                if (currentTime - this.lastTime >= 1000) {
+                    this.fps = Math.round((this.frameCount * 1000) / (currentTime - this.lastTime));
+                    document.getElementById('fps').textContent = this.fps + ' fps';
+                    document.getElementById('perf').textContent = this.updateTime.toFixed(1) + 'ms update';
+                    
+                    this.frameCount = 0;
+                    this.lastTime = currentTime;
+                }
             }
             
             animate() {
                 this.update();
                 this.draw();
+                this.updatePerformanceMetrics();
                 requestAnimationFrame(() => this.animate());
             }
         }
         
-        new MinimalGraph();
+        new OptimizedGraph();
     </script>
 </body>
 </html> 

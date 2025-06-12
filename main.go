@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -43,11 +44,29 @@ var (
 
 func main() {
 	flag.StringVar(&targetPath, "path", ".", "Path to analyze")
-	port := flag.String("port", "8084", "Server port")
+	port := flag.String("port", "8080", "Server port")
 	flag.Parse()
 
 	if len(flag.Args()) > 0 {
 		targetPath = flag.Args()[0]
+	}
+
+	// Validate and fix empty path
+	if targetPath == "" {
+		targetPath = "."
+		fmt.Println("⚠️ Empty path provided, defaulting to current directory")
+	}
+
+	// Validate port
+	if portNum, err := strconv.Atoi(*port); err != nil || portNum < 1 || portNum > 65535 {
+		fmt.Printf("⚠️ Invalid port '%s', defaulting to 8084\n", *port)
+		*port = "8084"
+	}
+
+	// Check if target path exists
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+		fmt.Printf("❌ Path '%s' does not exist\n", targetPath)
+		os.Exit(1)
 	}
 
 	http.HandleFunc("/", indexHandler)
@@ -92,6 +111,7 @@ func analyzeProject(projectPath string) (*Graph, error) {
 	nodeMap := make(map[string]*Node)
 	moduleToImporter := make(map[string][]string) // track which packages import each module
 	directModules := make(map[string]bool)        // track direct vs indirect modules
+	usedModules := make(map[string]bool)          // track modules that are actually imported
 
 	// Parse go.mod if exists
 	modPath := filepath.Join(projectPath, "go.mod")
@@ -165,6 +185,9 @@ func analyzeProject(projectPath string) (*Graph, error) {
 				}
 
 				if rootModule != "" {
+					// Mark this module as actually used
+					usedModules[rootModule] = true
+
 					// Add module node if not exists
 					addNode(graph, nodeMap, rootModule, rootModule, "external", 2)
 
@@ -184,22 +207,35 @@ func analyzeProject(projectPath string) (*Graph, error) {
 		return nil
 	})
 
-	// Connect main module to direct dependencies, and handle indirect dependency chains
-	for modulePath := range availableModules {
+	// ONLY connect modules that are actually used in imports
+	for modulePath := range usedModules {
 		if directModules[modulePath] {
-			// Direct dependency - connect to main
-			addNode(graph, nodeMap, modulePath, modulePath, "external", 2)
+			// Direct dependency that's actually imported - connect to main
 			addEdge(graph, mainModule, modulePath)
 		} else {
-			// Indirect dependency - find what it depends on
-			addNode(graph, nodeMap, modulePath, modulePath, "external", 3)
-
-			// Connect indirect dependencies to their likely parents
+			// Indirect dependency that's actually imported - find best parent
+			connected := false
 			for directModule := range directModules {
-				if directModules[directModule] && strings.Contains(modulePath, strings.Split(directModule, "/")[0]) {
-					// Likely dependency relationship
-					addEdge(graph, directModule, modulePath)
-					break
+				if directModules[directModule] && usedModules[directModule] {
+					// Check if this indirect module is likely a sub-dependency
+					if strings.HasPrefix(modulePath, strings.Split(directModule, "/")[0]) ||
+						strings.Contains(modulePath, strings.Split(directModule, "/")[0]) {
+						addEdge(graph, directModule, modulePath)
+						connected = true
+						break
+					}
+				}
+			}
+			// If we can't find a good parent, don't connect it to avoid orphans
+			if !connected {
+				// Remove the orphaned module to avoid yellow dots
+				for i, node := range graph.Nodes {
+					if node.ID == modulePath {
+						// Remove node
+						graph.Nodes = append(graph.Nodes[:i], graph.Nodes[i+1:]...)
+						delete(nodeMap, modulePath)
+						break
+					}
 				}
 			}
 		}
