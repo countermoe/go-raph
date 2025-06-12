@@ -57,65 +57,72 @@
             <div>physics: <span id="physicsMode">on</span></div>
             <div>trails: <span id="trailsMode">on</span></div>
             <div>labels: <span id="labelsMode">hover</span></div>
+            <div id="analysisMode" style="color: #666;">analysis: none</div>
         </div>
     </div>
+
+
 
     <script>
         class OptimizedGraph {
             constructor() {
                 this.canvas = document.getElementById('canvas');
                 this.ctx = this.canvas.getContext('2d');
+                this.w = this.canvas.width = window.innerWidth;
+                this.h = this.canvas.height = window.innerHeight;
+                this.cx = this.w / 2;
+                this.cy = this.h / 2;
+                
                 this.nodes = [];
                 this.edges = [];
-                this.nodeMap = new Map(); // Fast ID lookup
-                this.adjacencyList = new Map(); // O(1) neighbor lookup
+                this.nodeMap = new Map();
+                this.adjacencyList = new Map();
+                
                 this.time = 0;
-                
-                // Performance settings
-                this.enablePhysics = true;
-                this.enableTrails = true;
-                this.maxTrailLength = 12; // Increased for better visibility
-                this.trails = [];
-                this.spatialGrid = null;
-                this.gridSize = 80;
-                
-                // Zoom and pan
                 this.zoom = 1.0;
-                this.targetZoom = 1.0; // For smooth zooming
+                this.targetZoom = 1.0;
                 this.panX = 0;
                 this.panY = 0;
-                this.isDragging = false;
-                this.lastMouseX = 0;
-                this.lastMouseY = 0;
+                this.targetPanX = undefined;
+                this.targetPanY = undefined;
                 
-                // Path highlighting
+                this.showAllLabels = false;
+                this.enableTrails = true;
+                this.enablePhysics = true;
+                this.showUI = true;
                 this.selectedNode = null;
+                this.analysisMode = 'consumers'; // 'consumers' or 'dependencies'
                 this.highlightedPaths = [];
                 this.highlightedNodes = new Set();
                 this.highlightedEdges = new Set();
+                this.consumptionEdges = new Set();
                 
-                // Performance monitoring
+                // Performance tracking
                 this.frameCount = 0;
                 this.lastTime = performance.now();
                 this.fps = 0;
                 this.updateTime = 0;
                 
-                // Interaction
-                this.hoveredNode = null;
-                this.showAllLabels = false;
-                this.showUI = true; // New UI visibility toggle
-                this.mouseX = 0;
-                this.mouseY = 0;
+                // Spatial grid for performance
+                this.spatialGrid = new Map();
+                this.gridSize = 60;
+                this.gridCols = 0;
+                this.gridRows = 0;
                 
-                this.resize();
+                // Trails system
+                this.trails = [];
+                this.maxTrailLength = 15;
+                this.trailFade = 0.94;
+                
+                this.setupEventHandlers();
                 this.connect();
                 this.animate();
-                this.setupInteraction();
                 
+                // Handle window resize
                 window.addEventListener('resize', () => this.resize());
             }
             
-            setupInteraction() {
+            setupEventHandlers() {
                 let mouseDownPos = null;
                 let dragThreshold = 5; // pixels - if mouse moves less than this, it's a click
                 
@@ -666,13 +673,18 @@
                     
                     // Special styling for selected node (the dependency being analyzed)
                     if (isSelected) {
+                        // Different colors for different analysis modes
+                        const modeColor = this.analysisMode === 'consumers' ? 
+                            'rgba(255, 100, 100, 1)' :  // Red for consumers mode
+                            'rgba(100, 255, 100, 1)';   // Green for dependencies mode
+                        
                         // Pulsing effect for selected node
                         const pulse = 1 + Math.sin(this.time * 3) * 0.3;
-                        this.ctx.shadowColor = 'rgba(255, 100, 100, 1)';
+                        this.ctx.shadowColor = modeColor;
                         this.ctx.shadowBlur = size * pulse;
                         
-                        // Draw selection ring
-                        this.ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)';
+                        // Draw selection ring with mode color
+                        this.ctx.strokeStyle = modeColor;
                         this.ctx.lineWidth = 2 / this.zoom;
                         this.ctx.beginPath();
                         this.ctx.arc(node.x, node.y, size + 4, 0, Math.PI * 2);
@@ -694,16 +706,15 @@
             }
             
             getNodeSize(node) {
-                const base = { main: 8, package: 5, internal: 4, external: 3 }; // Slightly larger nodes
+                const base = { main: 8, package: 5, external: 3 }; // Simplified sizing
                 return base[node.type] || 3;
             }
             
             getNodeColor(node) {
                 const colors = {
-                    main: 'rgba(255, 100, 100, 1)',
-                    package: 'rgba(100, 150, 255, 1)', 
-                    internal: 'rgba(100, 255, 150, 1)',
-                    external: 'rgba(255, 200, 100, 1)'
+                    main: 'rgba(255, 100, 100, 1)',     // Red - main module
+                    package: 'rgba(100, 150, 255, 1)',  // Blue - local packages
+                    external: 'rgba(255, 200, 100, 1)'  // Orange - external dependencies
                 };
                 return colors[node.type] || 'rgba(150, 150, 150, 1)';
             }
@@ -789,39 +800,87 @@
                 console.log('=== SELECTING NODE FOR DEPENDENCY ANALYSIS ===');
                 console.log('Selected node:', node);
                 
+                // Toggle mode if clicking the same node again
+                if (this.selectedNode && this.selectedNode.id === node.id) {
+                    this.analysisMode = this.analysisMode === 'consumers' ? 'dependencies' : 'consumers';
+                    console.log('Toggling analysis mode to:', this.analysisMode);
+                } else {
+                    // New node selected, start with consumers
+                    this.analysisMode = 'consumers';
+                    console.log('New node selected, starting with consumers mode');
+                }
+                
+                // Update UI indicator
+                const modeElement = document.getElementById('analysisMode');
+                if (modeElement) {
+                    const modeText = this.analysisMode === 'consumers' ? 'consumers' : 'dependencies';
+                    const modeColor = this.analysisMode === 'consumers' ? '#ff6464' : '#64ff64';
+                    modeElement.textContent = `analysis: ${modeText}`;
+                    modeElement.style.color = modeColor;
+                    console.log('Updated UI indicator to:', modeText, 'with color:', modeColor);
+                } else {
+                    console.error('Could not find analysisMode element!');
+                }
+                
                 this.selectedNode = node;
                 this.highlightedPaths = [];
                 this.highlightedNodes.clear();
                 this.highlightedEdges.clear();
                 
-                // Find all consumers (reverse dependencies) of this node
-                console.log('Finding all consumers of:', node.label, '(' + node.id + ')');
-                
-                const allConsumers = this.findAllConsumers(node.id);
-                
-                if (allConsumers.size > 0) {
-                    console.log(`Found ${allConsumers.size} consumers:`, Array.from(allConsumers).map(id => {
-                        const n = this.nodeMap.get(id);
-                        return n ? n.label : id;
-                    }));
+                if (this.analysisMode === 'consumers') {
+                    // Show what depends on this node (consumers/reverse dependencies)
+                    console.log('Finding all consumers of:', node.label, '(' + node.id + ')');
                     
-                    // Highlight the selected node
-                    this.highlightedNodes.add(node.id);
+                    const allConsumers = this.findAllConsumers(node.id);
                     
-                    // Highlight all consumers
-                    allConsumers.forEach(consumerId => {
-                        this.highlightedNodes.add(consumerId);
-                    });
-                    
-                    // Highlight all edges in the dependency tree
-                    this.findDependencyEdges(node.id, allConsumers);
-                    
-                    console.log('Highlighted nodes:', Array.from(this.highlightedNodes));
-                    console.log('Highlighted edges:', Array.from(this.highlightedEdges));
+                    if (allConsumers.size > 0) {
+                        console.log(`Found ${allConsumers.size} consumers:`, Array.from(allConsumers).map(id => {
+                            const n = this.nodeMap.get(id);
+                            return n ? n.label : id;
+                        }));
+                        
+                        // Highlight the selected node
+                        this.highlightedNodes.add(node.id);
+                        
+                        // Highlight all consumers
+                        allConsumers.forEach(consumerId => {
+                            this.highlightedNodes.add(consumerId);
+                        });
+                        
+                        console.log('Highlighted nodes:', Array.from(this.highlightedNodes));
+                        console.log('Highlighted edges:', Array.from(this.highlightedEdges));
+                    } else {
+                        console.log('No consumers found - this might be a leaf node');
+                        // Just highlight the selected node itself
+                        this.highlightedNodes.add(node.id);
+                    }
                 } else {
-                    console.log('No consumers found - this might be a leaf node');
-                    // Just highlight the selected node itself
-                    this.highlightedNodes.add(node.id);
+                    // Show what this node depends on (dependencies/forward dependencies)
+                    console.log('Finding all dependencies of:', node.label, '(' + node.id + ')');
+                    
+                    const allDependencies = this.findAllDependencies(node.id);
+                    
+                    if (allDependencies.size > 0) {
+                        console.log(`Found ${allDependencies.size} dependencies:`, Array.from(allDependencies).map(id => {
+                            const n = this.nodeMap.get(id);
+                            return n ? n.label : id;
+                        }));
+                        
+                        // Highlight the selected node
+                        this.highlightedNodes.add(node.id);
+                        
+                        // Highlight all dependencies
+                        allDependencies.forEach(depId => {
+                            this.highlightedNodes.add(depId);
+                        });
+                        
+                        console.log('Highlighted nodes:', Array.from(this.highlightedNodes));
+                        console.log('Highlighted edges:', Array.from(this.highlightedEdges));
+                    } else {
+                        console.log('No dependencies found - this might be a root node');
+                        // Just highlight the selected node itself
+                        this.highlightedNodes.add(node.id);
+                    }
                 }
             }
             
@@ -846,7 +905,7 @@
                             console.log(`  ${'  '.repeat(depth)}  Found consumer: ${edge.source} → ${edge.target}`);
                             consumers.add(edge.target);
                             
-                            // Track this as a consumption edge
+                            // Track edge in both directions for drawing compatibility
                             consumptionEdges.add(`${edge.source}-${edge.target}`);
                             consumptionEdges.add(`${edge.target}-${edge.source}`);
                             
@@ -858,18 +917,49 @@
                 
                 findConsumersRecursive(targetNodeId);
                 
-                // Store the consumption edges for later use
-                this.consumptionEdges = consumptionEdges;
+                // Store the consumption edges for highlighting
+                this.highlightedEdges = consumptionEdges;
                 
                 return consumers;
             }
             
-            findDependencyEdges(targetNodeId, allConsumers) {
-                // Only highlight edges that are part of the actual consumption chain
-                // Not all edges between highlighted nodes
-                this.highlightedEdges = new Set(this.consumptionEdges);
+            findAllDependencies(targetNodeId) {
+                console.log('=== FORWARD DEPENDENCY ANALYSIS ===');
+                console.log('Finding dependencies of:', targetNodeId);
                 
-                console.log('Consumption edges to highlight:', Array.from(this.consumptionEdges));
+                const dependencies = new Set();
+                const visited = new Set();
+                const dependencyEdges = new Set(); // Track the actual dependency edges we find
+                
+                // Use DFS to find all nodes that this node transitively depends on
+                const findDependenciesRecursive = (nodeId, depth = 0) => {
+                    if (visited.has(nodeId) || depth > 10) return; // Prevent infinite loops
+                    visited.add(nodeId);
+                    
+                    console.log(`  ${'  '.repeat(depth)}Checking dependencies of: ${nodeId}`);
+                    
+                    // Find all edges where this node is the TARGET (things this node depends on)
+                    this.edges.forEach(edge => {
+                        if (edge.target === nodeId) {
+                            console.log(`  ${'  '.repeat(depth)}  Found dependency: ${edge.source} → ${edge.target}`);
+                            dependencies.add(edge.source);
+                            
+                            // Track edge in both directions for drawing compatibility
+                            dependencyEdges.add(`${edge.source}-${edge.target}`);
+                            dependencyEdges.add(`${edge.target}-${edge.source}`);
+                            
+                            // Recursively find what this dependency depends on
+                            findDependenciesRecursive(edge.source, depth + 1);
+                        }
+                    });
+                };
+                
+                findDependenciesRecursive(targetNodeId);
+                
+                // Store the dependency edges for highlighting
+                this.highlightedEdges = dependencyEdges;
+                
+                return dependencies;
             }
             
             clearSelection() {
@@ -877,6 +967,11 @@
                 this.highlightedPaths = [];
                 this.highlightedNodes.clear();
                 this.highlightedEdges.clear();
+                
+                // Reset UI indicator
+                const modeElement = document.getElementById('analysisMode');
+                modeElement.textContent = 'analysis: none';
+                modeElement.style.color = '#666';
             }
         }
         

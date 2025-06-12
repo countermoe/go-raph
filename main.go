@@ -131,7 +131,6 @@ func analyzeProject(projectPath string) (*Graph, error) {
 			for _, req := range modFile.Require {
 				availableModules[req.Mod.Path] = true
 				directModules[req.Mod.Path] = !req.Indirect
-				// Don't add nodes yet - let imports drive the connections
 			}
 		}
 	}
@@ -167,16 +166,24 @@ func analyzeProject(projectPath string) (*Graph, error) {
 		for _, imp := range file.Imports {
 			importPath := strings.Trim(imp.Path.Value, `"`)
 
-			// Skip standard library
-			if !strings.Contains(importPath, ".") {
+			// Skip standard library (packages without dots that aren't internal imports)
+			if !strings.Contains(importPath, ".") && !strings.HasPrefix(importPath, mainModule) {
 				continue
 			}
 
 			if strings.HasPrefix(importPath, mainModule) {
-				// Internal import
-				importID := "import:" + importPath
-				addNode(graph, nodeMap, importID, filepath.Base(importPath), "internal", 0)
-				addEdge(graph, packageID, importID)
+				// Internal import - connect packages directly, no separate import nodes
+				// Find or create the target package
+				targetRelPath := strings.TrimPrefix(importPath, mainModule+"/")
+				if targetRelPath == importPath {
+					// This is importing the main module itself, skip
+					continue
+				}
+
+				targetPackageID := "pkg:" + targetRelPath
+				targetDisplayName := filepath.Base(targetRelPath)
+				addNode(graph, nodeMap, targetPackageID, targetDisplayName, "package", 0)
+				addEdge(graph, packageID, targetPackageID)
 			} else {
 				// External import - find the best matching module (longest prefix)
 				var rootModule string
