@@ -44,6 +44,7 @@
             L: toggle labels<br>
             T: toggle trails<br>
             P: toggle physics<br>
+            U: toggle UI<br>
             Mouse: drag to pan<br>
             Wheel: zoom in/out
         </div>
@@ -80,11 +81,18 @@
                 
                 // Zoom and pan
                 this.zoom = 1.0;
+                this.targetZoom = 1.0; // For smooth zooming
                 this.panX = 0;
                 this.panY = 0;
                 this.isDragging = false;
                 this.lastMouseX = 0;
                 this.lastMouseY = 0;
+                
+                // Path highlighting
+                this.selectedNode = null;
+                this.highlightedPaths = [];
+                this.highlightedNodes = new Set();
+                this.highlightedEdges = new Set();
                 
                 // Performance monitoring
                 this.frameCount = 0;
@@ -95,6 +103,7 @@
                 // Interaction
                 this.hoveredNode = null;
                 this.showAllLabels = false;
+                this.showUI = true; // New UI visibility toggle
                 this.mouseX = 0;
                 this.mouseY = 0;
                 
@@ -107,11 +116,20 @@
             }
             
             setupInteraction() {
+                let mouseDownPos = null;
+                let dragThreshold = 5; // pixels - if mouse moves less than this, it's a click
+                
                 // Mouse drag for panning
                 this.canvas.addEventListener('mousedown', (e) => {
-                    this.isDragging = true;
-                    this.lastMouseX = e.clientX;
-                    this.lastMouseY = e.clientY;
+                    const rect = this.canvas.getBoundingClientRect();
+                    mouseDownPos = {
+                        x: e.clientX - rect.left,
+                        y: e.clientY - rect.top,
+                        clientX: e.clientX,
+                        clientY: e.clientY
+                    };
+                    console.log('Mouse down at:', mouseDownPos);
+                    this.isDragging = false; // Reset dragging state
                 });
                 
                 this.canvas.addEventListener('mousemove', (e) => {
@@ -119,45 +137,95 @@
                     this.mouseX = e.clientX - rect.left;
                     this.mouseY = e.clientY - rect.top;
                     
-                    if (this.isDragging) {
-                        const deltaX = e.clientX - this.lastMouseX;
-                        const deltaY = e.clientY - this.lastMouseY;
-                        this.panX += deltaX;
-                        this.panY += deltaY;
-                        this.lastMouseX = e.clientX;
-                        this.lastMouseY = e.clientY;
+                    if (mouseDownPos) {
+                        const deltaX = e.clientX - mouseDownPos.clientX;
+                        const deltaY = e.clientY - mouseDownPos.clientY;
+                        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                        
+                        if (distance > dragThreshold) {
+                            this.isDragging = true;
+                            this.panX += deltaX;
+                            this.panY += deltaY;
+                            mouseDownPos.clientX = e.clientX;
+                            mouseDownPos.clientY = e.clientY;
+                        }
                     } else {
-                        // Update hover detection with zoom/pan transform
+                        // Update hover detection
                         const worldX = (this.mouseX - this.panX) / this.zoom;
                         const worldY = (this.mouseY - this.panY) / this.zoom;
                         this.hoveredNode = this.getNodeAt(worldX, worldY);
                     }
                 });
                 
-                this.canvas.addEventListener('mouseup', () => {
+                this.canvas.addEventListener('mouseup', (e) => {
+                    if (mouseDownPos && !this.isDragging) {
+                        // This is a click, not a drag
+                        const rect = this.canvas.getBoundingClientRect();
+                        const screenX = e.clientX - rect.left;
+                        const screenY = e.clientY - rect.top;
+                        const worldX = (screenX - this.panX) / this.zoom;
+                        const worldY = (screenY - this.panY) / this.zoom;
+                        
+                        console.log('Click detected!');
+                        console.log('Screen coords:', screenX, screenY);
+                        console.log('Pan:', this.panX, this.panY);
+                        console.log('Zoom:', this.zoom);
+                        console.log('World coords:', worldX, worldY);
+                        
+                        // Check all nodes for hit
+                        let clickedNode = null;
+                        let minDistance = Infinity;
+                        
+                        this.nodes.forEach(node => {
+                            const dx = worldX - node.x;
+                            const dy = worldY - node.y;
+                            const distance = Math.sqrt(dx * dx + dy * dy);
+                            const size = this.getNodeSize(node);
+                            const hitRadius = size + 10; // Larger hit area
+                            
+                            console.log(`Node ${node.label} at (${node.x}, ${node.y}), distance: ${distance}, hit radius: ${hitRadius}`);
+                            
+                            if (distance < hitRadius && distance < minDistance) {
+                                minDistance = distance;
+                                clickedNode = node;
+                            }
+                        });
+                        
+                        if (clickedNode) {
+                            console.log('CLICKED NODE:', clickedNode.label, clickedNode.type);
+                            this.selectNodeAndHighlightPaths(clickedNode);
+                        } else {
+                            console.log('No node clicked, clearing selection');
+                            this.clearSelection();
+                        }
+                    }
+                    
+                    mouseDownPos = null;
                     this.isDragging = false;
                 });
                 
                 this.canvas.addEventListener('mouseleave', () => {
+                    mouseDownPos = null;
                     this.isDragging = false;
                     this.hoveredNode = null;
                 });
                 
-                // Zoom with mouse wheel
+                // Smooth zoom with mouse wheel
                 this.canvas.addEventListener('wheel', (e) => {
                     e.preventDefault();
                     const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-                    const newZoom = Math.max(0.1, Math.min(5.0, this.zoom * zoomFactor));
+                    const newZoom = Math.max(0.1, Math.min(5.0, this.targetZoom * zoomFactor));
                     
-                    // Zoom towards mouse position
+                    // Store target zoom for smooth animation
+                    this.targetZoom = newZoom;
+                    
+                    // Update pan to zoom towards mouse (but we'll animate to it)
                     const mouseX = e.clientX - this.canvas.getBoundingClientRect().left;
                     const mouseY = e.clientY - this.canvas.getBoundingClientRect().top;
                     
-                    this.panX = mouseX - (mouseX - this.panX) * (newZoom / this.zoom);
-                    this.panY = mouseY - (mouseY - this.panY) * (newZoom / this.zoom);
-                    this.zoom = newZoom;
-                    
-                    document.getElementById('zoom').textContent = `zoom: ${this.zoom.toFixed(1)}x`;
+                    // Calculate new pan position for smooth transition
+                    this.targetPanX = mouseX - (mouseX - this.panX) * (newZoom / this.zoom);
+                    this.targetPanY = mouseY - (mouseY - this.panY) * (newZoom / this.zoom);
                 });
                 
                 window.addEventListener('keydown', (e) => {
@@ -173,6 +241,30 @@
                     } else if (e.key === 'p' || e.key === 'P') {
                         this.enablePhysics = !this.enablePhysics;
                         document.getElementById('physicsMode').textContent = this.enablePhysics ? 'on' : 'off';
+                    } else if (e.key === 'u' || e.key === 'U') {
+                        this.showUI = !this.showUI;
+                        const info = document.querySelector('.info');
+                        const controls = document.querySelector('.controls');
+                        info.style.display = this.showUI ? 'block' : 'none';
+                        controls.style.display = this.showUI ? 'block' : 'none';
+                    } else if (e.key === 'Escape') {
+                        this.clearSelection();
+                    } else if (e.key === 'c' || e.key === 'C') {
+                        // Debug: log all nodes and their positions
+                        console.log('=== ALL NODES ===');
+                        this.nodes.forEach((node, i) => {
+                            console.log(`${i}: ${node.label} (${node.type}) at (${node.x.toFixed(1)}, ${node.y.toFixed(1)})`);
+                        });
+                    } else if (e.key === 'x' || e.key === 'X') {
+                        // Debug: test path finding with first external node
+                        const testNode = this.nodes.find(n => n.type === 'external');
+                        if (testNode) {
+                            console.log('=== TESTING PATH FINDING ===');
+                            console.log('Testing with node:', testNode.label);
+                            this.selectNodeAndHighlightPaths(testNode);
+                        } else {
+                            console.log('No external node found for testing');
+                        }
                     }
                 });
             }
@@ -316,6 +408,26 @@
             
             update() {
                 const updateStart = performance.now();
+                
+                // Smooth zoom animation
+                if (Math.abs(this.zoom - this.targetZoom) > 0.01) {
+                    this.zoom += (this.targetZoom - this.zoom) * 0.15; // Smooth transition
+                    document.getElementById('zoom').textContent = `zoom: ${this.zoom.toFixed(1)}x`;
+                }
+                
+                // Smooth pan animation
+                if (this.targetPanX !== undefined) {
+                    this.panX += (this.targetPanX - this.panX) * 0.15;
+                    this.panY += (this.targetPanY - this.panY) * 0.15;
+                    
+                    // Stop animation when close enough
+                    if (Math.abs(this.panX - this.targetPanX) < 0.5) {
+                        this.panX = this.targetPanX;
+                        this.panY = this.targetPanY;
+                        this.targetPanX = undefined;
+                        this.targetPanY = undefined;
+                    }
+                }
                 
                 if (!this.enablePhysics) {
                     this.updateTime = performance.now() - updateStart;
@@ -475,6 +587,7 @@
             }
             
             drawEdges() {
+                // Draw normal edges first
                 this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.4)'; // More visible edges
                 this.ctx.lineWidth = 1.0 / this.zoom; // Scale line width with zoom
                 this.ctx.beginPath();
@@ -486,6 +599,14 @@
                 for (const edge of this.edges) {
                     if (edgeCount++ > maxEdges) break;
                     
+                    const edgeKey = `${edge.source}-${edge.target}`;
+                    const reverseKey = `${edge.target}-${edge.source}`;
+                    
+                    // Skip highlighted edges for now
+                    if (this.highlightedEdges.has(edgeKey) || this.highlightedEdges.has(reverseKey)) {
+                        continue;
+                    }
+                    
                     const source = this.nodeMap.get(edge.source);
                     const target = this.nodeMap.get(edge.target);
                     if (source && target) {
@@ -494,13 +615,69 @@
                     }
                 }
                 this.ctx.stroke();
+                
+                // Draw highlighted edges with special styling
+                if (this.highlightedEdges.size > 0) {
+                    this.ctx.strokeStyle = 'rgba(255, 150, 50, 0.9)'; // Bright orange for paths
+                    this.ctx.lineWidth = 3.0 / this.zoom; // Thicker highlighted edges
+                    this.ctx.shadowColor = 'rgba(255, 150, 50, 0.5)';
+                    this.ctx.shadowBlur = 8 / this.zoom;
+                    this.ctx.beginPath();
+                    
+                    for (const edge of this.edges) {
+                        const edgeKey = `${edge.source}-${edge.target}`;
+                        const reverseKey = `${edge.target}-${edge.source}`;
+                        
+                        if (this.highlightedEdges.has(edgeKey) || this.highlightedEdges.has(reverseKey)) {
+                            const source = this.nodeMap.get(edge.source);
+                            const target = this.nodeMap.get(edge.target);
+                            if (source && target) {
+                                this.ctx.moveTo(source.x, source.y);
+                                this.ctx.lineTo(target.x, target.y);
+                            }
+                        }
+                    }
+                    this.ctx.stroke();
+                    this.ctx.shadowBlur = 0;
+                }
             }
             
             drawNodes() {
                 this.nodes.forEach(node => {
                     const size = this.getNodeSize(node);
-                    const color = this.getNodeColor(node);
-                    const alpha = 0.8 + Math.sin(this.time + node.x * 0.005) * 0.2;
+                    const isHighlighted = this.highlightedNodes.has(node.id);
+                    const isSelected = this.selectedNode && this.selectedNode.id === node.id;
+                    
+                    let color = this.getNodeColor(node);
+                    let alpha = 0.8 + Math.sin(this.time + node.x * 0.005) * 0.2;
+                    
+                    // Dim non-highlighted nodes when selection is active
+                    if (this.highlightedNodes.size > 0 && !isHighlighted) {
+                        alpha *= 0.3; // Dim non-highlighted nodes
+                    }
+                    
+                    // Special styling for highlighted nodes
+                    if (isHighlighted) {
+                        alpha = 1.0;
+                        // Brighter glow for highlighted nodes
+                        this.ctx.shadowColor = 'rgba(255, 150, 50, 0.8)';
+                        this.ctx.shadowBlur = size * 0.8;
+                    }
+                    
+                    // Special styling for selected node
+                    if (isSelected) {
+                        // Pulsing effect for selected node
+                        const pulse = 1 + Math.sin(this.time * 3) * 0.3;
+                        this.ctx.shadowColor = 'rgba(255, 100, 100, 1)';
+                        this.ctx.shadowBlur = size * pulse;
+                        
+                        // Draw selection ring
+                        this.ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)';
+                        this.ctx.lineWidth = 2 / this.zoom;
+                        this.ctx.beginPath();
+                        this.ctx.arc(node.x, node.y, size + 4, 0, Math.PI * 2);
+                        this.ctx.stroke();
+                    }
                     
                     // Main node
                     this.ctx.fillStyle = color.replace('1)', alpha + ')');
@@ -508,13 +685,11 @@
                     this.ctx.arc(node.x, node.y, size, 0, Math.PI * 2);
                     this.ctx.fill();
                     
-                    // Glow (only for important nodes in large graphs)
-                    if (this.nodes.length < 150 || node.type === 'main') {
-                        this.ctx.shadowColor = color;
-                        this.ctx.shadowBlur = size * 0.4;
-                        this.ctx.fill();
-                        this.ctx.shadowBlur = 0;
+                    // Glow effect
+                    if (this.nodes.length < 150 || node.type === 'main' || isHighlighted || isSelected) {
+                        this.ctx.fill(); // Apply shadow
                     }
+                    this.ctx.shadowBlur = 0;
                 });
             }
             
@@ -608,6 +783,98 @@
                 this.draw();
                 this.updatePerformanceMetrics();
                 requestAnimationFrame(() => this.animate());
+            }
+            
+            selectNodeAndHighlightPaths(node) {
+                console.log('=== SELECTING NODE ===');
+                console.log('Selected node:', node);
+                
+                this.selectedNode = node;
+                this.highlightedPaths = [];
+                this.highlightedNodes.clear();
+                this.highlightedEdges.clear();
+                
+                // Find main module
+                const mainModule = this.nodes.find(n => n.type === 'main');
+                if (!mainModule) {
+                    console.log('No main module found');
+                    this.clearSelection();
+                    return;
+                }
+                
+                if (node.id === mainModule.id) {
+                    console.log('Selected node is main module, clearing selection');
+                    this.clearSelection();
+                    return;
+                }
+                
+                console.log('Finding paths from', node.label, '(' + node.id + ')', 'to', mainModule.label, '(' + mainModule.id + ')');
+                
+                // Simple BFS to find shortest path first
+                const path = this.findShortestPath(node.id, mainModule.id);
+                if (path.length > 0) {
+                    console.log('Found path:', path.map(id => {
+                        const n = this.nodeMap.get(id);
+                        return n ? n.label : id;
+                    }));
+                    
+                    this.highlightedPaths = [path];
+                    
+                    // Mark all nodes and edges in path for highlighting
+                    for (let i = 0; i < path.length; i++) {
+                        this.highlightedNodes.add(path[i]);
+                        if (i < path.length - 1) {
+                            this.highlightedEdges.add(`${path[i]}-${path[i + 1]}`);
+                            this.highlightedEdges.add(`${path[i + 1]}-${path[i]}`); // Both directions
+                        }
+                    }
+                    
+                    console.log('Highlighted nodes:', Array.from(this.highlightedNodes));
+                    console.log('Highlighted edges:', Array.from(this.highlightedEdges));
+                } else {
+                    console.log('No path found');
+                }
+            }
+            
+            findShortestPath(startId, endId) {
+                console.log('=== PATHFINDING ===');
+                console.log('Start:', startId, 'End:', endId);
+                console.log('Adjacency list has', this.adjacencyList.size, 'entries');
+                
+                const queue = [[startId]];
+                const visited = new Set();
+                
+                while (queue.length > 0) {
+                    const path = queue.shift();
+                    const currentId = path[path.length - 1];
+                    
+                    if (currentId === endId) {
+                        console.log('Found path:', path);
+                        return path;
+                    }
+                    
+                    if (visited.has(currentId)) continue;
+                    visited.add(currentId);
+                    
+                    const neighbors = this.adjacencyList.get(currentId) || [];
+                    console.log(`Node ${currentId} has neighbors:`, neighbors);
+                    
+                    neighbors.forEach(neighborId => {
+                        if (!visited.has(neighborId) && !path.includes(neighborId)) {
+                            queue.push([...path, neighborId]);
+                        }
+                    });
+                }
+                
+                console.log('No path found');
+                return [];
+            }
+            
+            clearSelection() {
+                this.selectedNode = null;
+                this.highlightedPaths = [];
+                this.highlightedNodes.clear();
+                this.highlightedEdges.clear();
             }
         }
         
