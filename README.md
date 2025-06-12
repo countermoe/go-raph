@@ -1,6 +1,6 @@
 # go-raph
 
-minimalist dependency graph visualization
+minimalist go dependency graph visualization
 
 ## usage
 
