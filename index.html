@@ -139,6 +139,9 @@
                 this.searchContainer = document.getElementById('searchContainer');
                 this.searchInput = document.getElementById('searchInput');
                 
+                // Set of node IDs whose labels should always be shown (selected + neighbors)
+                this.labelNodes = new Set();
+                
                 this.setupEventHandlers();
                 this.connect();
                 this.animate();
@@ -628,6 +631,14 @@
                         this.nodes.slice(0, maxLabelsToShow) : this.nodes;
                     nodesToLabel.forEach(node => this.drawLabel(node));
                 }
+
+                // Always show labels for selected node and its neighbors
+                if (this.labelNodes && this.labelNodes.size > 0) {
+                    this.labelNodes.forEach(id => {
+                        const n = this.nodeMap.get(id);
+                        if (n) this.drawLabel(n);
+                    });
+                }
             }
             
             drawTrails() {
@@ -908,6 +919,12 @@
                         // Just highlight the selected node itself
                         this.highlightedNodes.add(node.id);
                     }
+
+                    // Update label set for selected node + highlighted tree
+                    this.labelNodes.clear();
+                    this.labelNodes.add(node.id);
+                    this.highlightedNodes.forEach(id => this.labelNodes.add(id));
+
                 } else {
                     // Show what this node depends on (dependencies/forward dependencies)
                     console.log('Finding all dependencies of:', node.label, '(' + node.id + ')');
@@ -935,6 +952,11 @@
                         // Just highlight the selected node itself
                         this.highlightedNodes.add(node.id);
                     }
+
+                    // Update label set for selected node + highlighted tree
+                    this.labelNodes.clear();
+                    this.labelNodes.add(node.id);
+                    this.highlightedNodes.forEach(id => this.labelNodes.add(id));
                 }
             }
             
@@ -1026,6 +1048,9 @@
                 const modeElement = document.getElementById('analysisMode');
                 modeElement.textContent = 'analysis: none';
                 modeElement.style.color = '#666';
+
+                // Clear persistent labels
+                this.labelNodes.clear();
             }
             
             searchPackageByName(query) {
