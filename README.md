@@ -1,6 +1,10 @@
 # go-raph
 
-minimalist dependency graph visualization
+minimalist go dependency graph visualization
+
+## screenshot
+
+<img width="924" alt="Screenshot 2025-06-12 at 1 50 40 AM" src="https://github.com/user-attachments/assets/4c9f4119-4462-407f-b09e-946a733552aa" />
 
 ## usage
 
