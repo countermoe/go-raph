@@ -33,6 +33,23 @@
         .fps {
             color: rgba(255,255,100,0.8);
         }
+        .search-container {
+            position: absolute;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            display: none;
+        }
+        .search-container input {
+            padding: 6px 10px;
+            font-size: 14px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background: #1a1a1a;
+            color: #fff;
+            width: 240px;
+        }
     </style>
 </head>
 <body>
@@ -44,6 +61,7 @@
             L: toggle labels<br>
             T: toggle trails<br>
             P: toggle physics<br>
+            F: search packages<br>
             U: toggle UI<br>
             Mouse: drag to pan<br>
             Wheel: zoom in/out
@@ -61,7 +79,10 @@
         </div>
     </div>
 
-
+    <!-- Search overlay -->
+    <div class="search-container" id="searchContainer">
+        <input type="text" id="searchInput" placeholder="Search package..." />
+    </div>
 
     <script>
         class OptimizedGraph {
@@ -113,6 +134,10 @@
                 this.trails = [];
                 this.maxTrailLength = 15;
                 this.trailFade = 0.94;
+                
+                // Search UI elements
+                this.searchContainer = document.getElementById('searchContainer');
+                this.searchInput = document.getElementById('searchInput');
                 
                 this.setupEventHandlers();
                 this.connect();
@@ -236,6 +261,10 @@
                 });
                 
                 window.addEventListener('keydown', (e) => {
+                    // If the search input is currently focused, ignore global shortcuts
+                    if (document.activeElement === this.searchInput) {
+                        return;
+                    }
                     console.log('Key pressed:', e.key); // Debug logging
                     if (e.key === 'l' || e.key === 'L') {
                         this.showAllLabels = !this.showAllLabels;
@@ -248,6 +277,14 @@
                     } else if (e.key === 'p' || e.key === 'P') {
                         this.enablePhysics = !this.enablePhysics;
                         document.getElementById('physicsMode').textContent = this.enablePhysics ? 'on' : 'off';
+                    } else if (e.key === 'f' || e.key === 'F') {
+                        // Prevent the key character from being typed into the search bar when it opens
+                        e.preventDefault();
+                        if (this.searchContainer.style.display === 'block') {
+                            this.hideSearch();
+                        } else {
+                            this.showSearch();
+                        }
                     } else if (e.key === 'u' || e.key === 'U') {
                         this.showUI = !this.showUI;
                         const info = document.querySelector('.info');
@@ -272,6 +309,23 @@
                         } else {
                             console.log('No external node found for testing');
                         }
+                    }
+                });
+
+                // Search input handlers
+                this.searchInput.addEventListener('keydown', (e) => {
+                    // Always prevent the keystroke from bubbling to the window handler
+                    e.stopPropagation();
+
+                    if (e.key === 'Enter') {
+                        const term = e.target.value.trim();
+                        if (term) {
+                            this.searchPackageByName(term);
+                            this.hideSearch();
+                        }
+                    } else if (e.key === 'Escape') {
+                        this.hideSearch();
+                        this.canvas.focus();
                     }
                 });
             }
@@ -972,6 +1026,52 @@
                 const modeElement = document.getElementById('analysisMode');
                 modeElement.textContent = 'analysis: none';
                 modeElement.style.color = '#666';
+            }
+            
+            searchPackageByName(query) {
+                const lower = query.toLowerCase();
+
+                // Filter nodes that contain the substring (works for all types, incl. external)
+                const matches = this.nodes.filter(n => n.label.toLowerCase().includes(lower));
+
+                if (matches.length === 0) {
+                    alert(`No packages found for "${query}"`);
+                    return;
+                }
+
+                // Sort by relevance: earlier substring position, then shorter label length
+                matches.sort((a, b) => {
+                    const ai = a.label.toLowerCase().indexOf(lower);
+                    const bi = b.label.toLowerCase().indexOf(lower);
+                    if (ai !== bi) return ai - bi;
+                    if (a.label.length !== b.label.length) return a.label.length - b.label.length;
+                    // Tie-breaker: prefer 'package' and 'external' over 'main'
+                    const priority = { package: 0, external: 1, main: 2 };
+                    return (priority[a.type] || 3) - (priority[b.type] || 3);
+                });
+
+                // Use the top-ranked match
+                const node = matches[0];
+                this.selectNodeAndHighlightPaths(node);
+
+                // Smoothly pan the view so the found node is centered
+                this.targetPanX = this.cx - node.x * this.zoom;
+                this.targetPanY = this.cy - node.y * this.zoom;
+            }
+
+            hideSearch() {
+                if (this.searchContainer) {
+                    this.searchContainer.style.display = 'none';
+                    this.searchInput.blur();
+                }
+            }
+
+            showSearch() {
+                if (this.searchContainer) {
+                    this.searchContainer.style.display = 'block';
+                    this.searchInput.value = '';
+                    this.searchInput.focus();
+                }
             }
         }
         
